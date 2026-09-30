@@ -113,9 +113,11 @@ function run(): void {
     // 2. Pack the package and confirm the tarball carries every declared target.
     const packDir = join(workDir, "pack");
     mkdirSync(packDir);
-    const packOutput = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+    const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+    const packOutput = execFileSync(npmCmd, ["pack", "--json", "--pack-destination", packDir], {
       cwd: ROOT,
       encoding: "utf8",
+      shell: process.platform === "win32",
     });
     const packed = JSON.parse(packOutput) as Array<{
       filename: string;
@@ -140,9 +142,9 @@ function run(): void {
       JSON.stringify({ name: "export-map-consumer", private: true, type: "module" }, null, 2),
     );
     execFileSync(
-      "npm",
+      npmCmd,
       ["install", "--no-audit", "--no-fund", "--prefer-offline", join(packDir, first.filename)],
-      { cwd: consumerDir, stdio: "inherit" },
+      { cwd: consumerDir, stdio: "inherit", shell: process.platform === "win32" },
     );
 
     const negativeSpecifiers = UNDECLARED_SUFFIXES.map((suffix) => `${manifest.name}${suffix}`);
