@@ -13,7 +13,13 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { Address, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import {
+  Address,
+  nativeToScVal,
+  rpc,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
 
@@ -119,12 +125,23 @@ export type CheckResult =
  */
 export function policyToScVal(policy: PolicyConfig): xdr.ScVal {
   const entries: Array<{ key: string; val: xdr.ScVal }> = [
-    { key: "per_tx_cap", val: nativeToScVal(policy.per_tx_cap, { type: "i128" }) },
-    { key: "window_secs", val: nativeToScVal(policy.window_secs, { type: "u64" }) },
-    { key: "window_cap", val: nativeToScVal(policy.window_cap, { type: "i128" }) },
+    {
+      key: "per_tx_cap",
+      val: nativeToScVal(policy.per_tx_cap, { type: "i128" }),
+    },
+    {
+      key: "window_secs",
+      val: nativeToScVal(policy.window_secs, { type: "u64" }),
+    },
+    {
+      key: "window_cap",
+      val: nativeToScVal(policy.window_cap, { type: "i128" }),
+    },
     {
       key: "assets",
-      val: xdr.ScVal.scvVec(policy.assets.map((asset) => new Address(asset).toScVal())),
+      val: xdr.ScVal.scvVec(
+        policy.assets.map((asset) => new Address(asset).toScVal()),
+      ),
     },
     {
       key: "protocols",
@@ -137,7 +154,9 @@ export function policyToScVal(policy: PolicyConfig): xdr.ScVal {
               val:
                 rule.fns === null
                   ? xdr.ScVal.scvVoid()
-                  : xdr.ScVal.scvVec(rule.fns.map((fn) => xdr.ScVal.scvSymbol(fn))),
+                  : xdr.ScVal.scvVec(
+                      rule.fns.map((fn) => xdr.ScVal.scvSymbol(fn)),
+                    ),
             },
           ]),
         ),
@@ -145,14 +164,66 @@ export function policyToScVal(policy: PolicyConfig): xdr.ScVal {
     },
     {
       key: "recipients",
-      val: xdr.ScVal.scvVec(policy.recipients.map((address) => new Address(address).toScVal())),
+      val: xdr.ScVal.scvVec(
+        policy.recipients.map((address) => new Address(address).toScVal()),
+      ),
     },
-    { key: "allow_any_recipient", val: xdr.ScVal.scvBool(policy.allow_any_recipient) },
-    { key: "active_from", val: nativeToScVal(policy.active_from, { type: "u64" }) },
-    { key: "active_until", val: nativeToScVal(policy.active_until, { type: "u64" }) },
+    {
+      key: "allow_any_recipient",
+      val: xdr.ScVal.scvBool(policy.allow_any_recipient),
+    },
+    {
+      key: "active_from",
+      val: nativeToScVal(policy.active_from, { type: "u64" }),
+    },
+    {
+      key: "active_until",
+      val: nativeToScVal(policy.active_until, { type: "u64" }),
+    },
     { key: "paused", val: xdr.ScVal.scvBool(policy.paused) },
-    { key: "dms_grace_secs", val: nativeToScVal(policy.dms_grace_secs, { type: "u64" }) },
+    {
+      key: "dms_grace_secs",
+      val: nativeToScVal(policy.dms_grace_secs, { type: "u64" }),
+    },
   ];
+
+  if (policy.blocked_recipients !== undefined) {
+    entries.push({
+      key: "blocked_recipients",
+      val:
+        policy.blocked_recipients === null
+          ? xdr.ScVal.scvVoid()
+          : xdr.ScVal.scvVec(
+              policy.blocked_recipients.map((recipient) =>
+                new Address(recipient).toScVal(),
+              ),
+            ),
+    });
+  }
+
+  if (policy.recipient_window_caps !== undefined) {
+    entries.push({
+      key: "recipient_window_caps",
+      val:
+        policy.recipient_window_caps === null
+          ? xdr.ScVal.scvVoid()
+          : xdr.ScVal.scvVec(
+              policy.recipient_window_caps.map((entry) =>
+                sortedScMap([
+                  {
+                    key: "recipient",
+                    val: new Address(entry.recipient).toScVal(),
+                  },
+                  {
+                    key: "cap",
+                    val: nativeToScVal(entry.cap, { type: "i128" }),
+                  },
+                ]),
+              ),
+            ),
+    });
+  }
+
   return sortedScMap(entries);
 }
 
@@ -168,6 +239,10 @@ const POLICY_FIELDS = [
   "recipients",
   "window_cap",
   "window_secs",
+] as const;
+const OPTIONAL_POLICY_FIELDS = [
+  "blocked_recipients",
+  "recipient_window_caps",
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
 const I128_MIN = -(2n ** 127n);
@@ -204,7 +279,21 @@ const U64_MAX = 2n ** 64n - 1n;
  */
 export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
   try {
-    const fields = symbolMap(policyMap(scVal), "policy", POLICY_FIELDS);
+    const fields = symbolMap(
+      policyMap(scVal),
+      "policy",
+      POLICY_FIELDS,
+      OPTIONAL_POLICY_FIELDS,
+    );
+    const blockedRecipients = optionalAddressVector(
+      fields.get("blocked_recipients"),
+      "blocked_recipients",
+    );
+    const recipientWindowCaps = optionalRecipientWindowCaps(
+      fields.get("recipient_window_caps"),
+      "recipient_window_caps",
+    );
+
     return {
       per_tx_cap: policyInteger(
         fields.get("per_tx_cap")!,
@@ -213,7 +302,13 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         I128_MIN,
         I128_MAX,
       ),
-      window_secs: policyInteger(fields.get("window_secs")!, "window_secs", "u64", 0n, U64_MAX),
+      window_secs: policyInteger(
+        fields.get("window_secs")!,
+        "window_secs",
+        "u64",
+        0n,
+        U64_MAX,
+      ),
       window_cap: policyInteger(
         fields.get("window_cap")!,
         "window_cap",
@@ -228,8 +323,20 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         fields.get("allow_any_recipient")!,
         "allow_any_recipient",
       ),
-      active_from: policyInteger(fields.get("active_from")!, "active_from", "u64", 0n, U64_MAX),
-      active_until: policyInteger(fields.get("active_until")!, "active_until", "u64", 0n, U64_MAX),
+      active_from: policyInteger(
+        fields.get("active_from")!,
+        "active_from",
+        "u64",
+        0n,
+        U64_MAX,
+      ),
+      active_until: policyInteger(
+        fields.get("active_until")!,
+        "active_until",
+        "u64",
+        0n,
+        U64_MAX,
+      ),
       paused: policyBoolean(fields.get("paused")!, "paused"),
       dms_grace_secs: policyInteger(
         fields.get("dms_grace_secs")!,
@@ -238,6 +345,12 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         0n,
         U64_MAX,
       ),
+      ...(blockedRecipients === undefined
+        ? {}
+        : { blocked_recipients: blockedRecipients }),
+      ...(recipientWindowCaps === undefined
+        ? {}
+        : { recipient_window_caps: recipientWindowCaps }),
     };
   } catch (error) {
     if (error instanceof PolicyDecodeError) throw error;
@@ -261,7 +374,10 @@ function policyMap(scVal: xdr.ScVal): xdr.ScVal {
     );
   }
   if (scVal.type === "scvVoid") {
-    throw policyDecodeFailure("policy", "no policy is installed (Void is None, not a config)");
+    throw policyDecodeFailure(
+      "policy",
+      "no policy is installed (Void is None, not a config)",
+    );
   }
   throw policyDecodeFailure("policy", `expected a map, got ${scVal.type}`);
 }
@@ -270,8 +386,10 @@ function symbolMap(
   scVal: xdr.ScVal,
   path: string,
   expectedFields: readonly string[],
+  optionalFields: readonly string[] = [],
 ): Map<string, xdr.ScVal> {
-  if (scVal.type !== "scvMap") throw policyDecodeFailure(path, `expected a map, got ${scVal.type}`);
+  if (scVal.type !== "scvMap")
+    throw policyDecodeFailure(path, `expected a map, got ${scVal.type}`);
 
   const entries = (scVal as unknown as { map?: xdr.ScMapEntry[] }).map ?? [];
   const fields = new Map<string, xdr.ScVal>();
@@ -279,14 +397,24 @@ function symbolMap(
 
   for (const entry of entries) {
     if (entry.key.type !== "scvSymbol") {
-      throw policyDecodeFailure(`${path}.<key>`, `expected a symbol key, got ${entry.key.type}`);
+      throw policyDecodeFailure(
+        `${path}.<key>`,
+        `expected a symbol key, got ${entry.key.type}`,
+      );
     }
     const name = String(scValToNative(entry.key));
-    if (fields.has(name)) throw policyDecodeFailure(path, `duplicate field ${JSON.stringify(name)}`);
+    if (fields.has(name))
+      throw policyDecodeFailure(
+        path,
+        `duplicate field ${JSON.stringify(name)}`,
+      );
     if (previous !== null && name <= previous) {
-      throw policyDecodeFailure(path, `symbol keys are not sorted (${previous} precedes ${name})`);
+      throw policyDecodeFailure(
+        path,
+        `symbol keys are not sorted (${previous} precedes ${name})`,
+      );
     }
-    if (!expectedFields.includes(name)) {
+    if (!expectedFields.includes(name) && !optionalFields.includes(name)) {
       throw policyDecodeFailure(path, `unknown field ${JSON.stringify(name)}`);
     }
     fields.set(name, entry.val);
@@ -294,7 +422,8 @@ function symbolMap(
   }
 
   const missing = expectedFields.filter((name) => !fields.has(name));
-  if (missing.length > 0) throw policyDecodeFailure(path, `missing field(s): ${missing.join(", ")}`);
+  if (missing.length > 0)
+    throw policyDecodeFailure(path, `missing field(s): ${missing.join(", ")}`);
   return fields;
 }
 
@@ -319,7 +448,10 @@ function policyInteger(
     value = native;
   } else if (typeof native === "number") {
     if (!Number.isSafeInteger(native)) {
-      throw policyDecodeFailure(path, `number ${native} cannot be represented safely`);
+      throw policyDecodeFailure(
+        path,
+        `number ${native} cannot be represented safely`,
+      );
     }
     value = BigInt(native);
   } else if (typeof native === "string" && /^[+-]?\d+$/.test(native)) {
@@ -329,7 +461,10 @@ function policyInteger(
   }
 
   if (value < min || value > max) {
-    throw policyDecodeFailure(path, `${value} is outside the supported [${min}, ${max}] range`);
+    throw policyDecodeFailure(
+      path,
+      `${value} is outside the supported [${min}, ${max}] range`,
+    );
   }
   return value;
 }
@@ -339,7 +474,8 @@ function policyBoolean(scVal: xdr.ScVal, path: string): boolean {
     throw policyDecodeFailure(path, `expected bool, got ${scVal.type}`);
   }
   const value = scValToNative(scVal);
-  if (typeof value !== "boolean") throw policyDecodeFailure(path, "value did not decode to bool");
+  if (typeof value !== "boolean")
+    throw policyDecodeFailure(path, "value did not decode to bool");
   return value;
 }
 
@@ -358,21 +494,64 @@ function policyAddress(scVal: xdr.ScVal, path: string): string {
     const address = new Address(scValToNative(scVal) as string);
     return address.toString();
   } catch (error) {
-    throw policyDecodeFailure(path, "value is not a valid Stellar address", error);
+    throw policyDecodeFailure(
+      path,
+      "value is not a valid Stellar address",
+      error,
+    );
   }
 }
 
 function addressVector(scVal: xdr.ScVal, path: string): string[] {
-  return policyVec(scVal, path).map((item, index) => policyAddress(item, `${path}[${index}]`));
+  return policyVec(scVal, path).map((item, index) =>
+    policyAddress(item, `${path}[${index}]`),
+  );
 }
 
 function functionSymbols(scVal: xdr.ScVal, path: string): string[] | null {
   if (scVal.type === "scvVoid") return null;
   return policyVec(scVal, path).map((item, index) => {
     if (item.type !== "scvSymbol") {
-      throw policyDecodeFailure(`${path}[${index}]`, `expected Symbol, got ${item.type}`);
+      throw policyDecodeFailure(
+        `${path}[${index}]`,
+        `expected Symbol, got ${item.type}`,
+      );
     }
     return String(scValToNative(item));
+  });
+}
+
+function optionalAddressVector(
+  scVal: xdr.ScVal | undefined,
+  path: string,
+): string[] | undefined {
+  if (scVal === undefined) return undefined;
+  if (scVal.type === "scvVoid") return undefined;
+  return addressVector(scVal, path);
+}
+
+function optionalRecipientWindowCaps(
+  scVal: xdr.ScVal | undefined,
+  path: string,
+): RecipientWindowCap[] | undefined {
+  if (scVal === undefined) return undefined;
+  if (scVal.type === "scvVoid") return undefined;
+  return policyVec(scVal, path).map((entry, index) => {
+    const entryPath = `${path}[${index}]`;
+    const fields = symbolMap(entry, entryPath, ["recipient", "cap"]);
+    return {
+      recipient: policyAddress(
+        fields.get("recipient")!,
+        `${entryPath}.recipient`,
+      ),
+      cap: policyInteger(
+        fields.get("cap")!,
+        `${entryPath}.cap`,
+        "i128",
+        0n,
+        I128_MAX,
+      ),
+    };
   });
 }
 
@@ -387,11 +566,18 @@ function protocolRules(scVal: xdr.ScVal): ProtocolRule[] {
   });
 }
 
-function policyDecodeFailure(path: string, detail: string, cause?: unknown): PolicyDecodeError {
-  return new PolicyDecodeError(`cannot decode policy field ${path}: ${detail}`, {
-    path,
-    ...(cause === undefined ? {} : { cause }),
-  });
+function policyDecodeFailure(
+  path: string,
+  detail: string,
+  cause?: unknown,
+): PolicyDecodeError {
+  return new PolicyDecodeError(
+    `cannot decode policy field ${path}: ${detail}`,
+    {
+      path,
+      ...(cause === undefined ? {} : { cause }),
+    },
+  );
 }
 
 /**
@@ -399,21 +585,35 @@ function policyDecodeFailure(path: string, detail: string, cause?: unknown): Pol
  * requires for struct conversion. Comparison is by code unit, which for the
  * ASCII field names used by the contract is byte order.
  */
-function sortedScMap(entries: Array<{ key: string; val: xdr.ScVal }>): xdr.ScVal {
-  const sorted = [...entries].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+function sortedScMap(
+  entries: Array<{ key: string; val: xdr.ScVal }>,
+): xdr.ScVal {
+  const sorted = [...entries].sort((a, b) =>
+    a.key < b.key ? -1 : a.key > b.key ? 1 : 0,
+  );
   return xdr.ScVal.scvMap(
     sorted.map(
       (item) =>
-        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(item.key), val: item.val }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol(item.key),
+          val: item.val,
+        }),
     ),
   );
 }
 
 export function decodeCheckResult(raw: unknown): CheckResult {
   if (raw === "Allowed") return { kind: "allowed" };
-  if (raw && typeof raw === "object" && "Blocked" in (raw as Record<string, unknown>)) {
+  if (
+    raw &&
+    typeof raw === "object" &&
+    "Blocked" in (raw as Record<string, unknown>)
+  ) {
     const reason = (raw as { Blocked: unknown }).Blocked;
-    return { kind: "blocked", reason: typeof reason === "string" ? reason : String(reason) };
+    return {
+      kind: "blocked",
+      reason: typeof reason === "string" ? reason : String(reason),
+    };
   }
   throw new ContractResponseError(
     `unexpected CheckResult payload from the guard: ${JSON.stringify(raw)}`,
@@ -462,14 +662,19 @@ export function isDeadManFrozen(status: GuardStatus): boolean {
  * a full-grace rendering for a fresh account can treat `null` (with a non-zero
  * grace and `last_heartbeat == 0`) as "countdown not yet started".
  */
-export function deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null {
-  if (!policy || policy.dms_grace_secs === 0n || status.last_heartbeat === 0n) return null;
+export function deadManRemaining(
+  status: GuardStatus,
+  policy: PolicyConfig | null,
+): bigint | null {
+  if (!policy || policy.dms_grace_secs === 0n || status.last_heartbeat === 0n)
+    return null;
   return status.last_heartbeat + policy.dms_grace_secs - status.now;
 }
 
 /** A compact, log-friendly rendering of the policy in force. */
 export function describePolicy(policy: PolicyConfig | null): string {
-  if (!policy) return "no policy installed (default-deny: every action is blocked)";
+  if (!policy)
+    return "no policy installed (default-deny: every action is blocked)";
   const parts = [
     `per-tx cap ${policy.per_tx_cap}`,
     `rolling window ${policy.window_cap} / ${policy.window_secs}s`,
@@ -479,7 +684,9 @@ export function describePolicy(policy: PolicyConfig | null): string {
       : `${policy.recipients.length} allowlisted recipient(s)`,
     `${policy.protocols.length} allowlisted protocol(s)`,
     policy.paused ? "PAUSED" : "active",
-    policy.dms_grace_secs > 0n ? `dead-man grace ${policy.dms_grace_secs}s` : "dead-man switch off",
+    policy.dms_grace_secs > 0n
+      ? `dead-man grace ${policy.dms_grace_secs}s`
+      : "dead-man switch off",
   ];
   return parts.join(", ");
 }
@@ -497,13 +704,19 @@ export function describePolicy(policy: PolicyConfig | null): string {
  */
 export function extractTransferAmount(call: ContractCall): bigint | null {
   const arg =
-    call.fn === "transfer" ? call.args?.[2] : call.fn === "transfer_from" ? call.args?.[3] : undefined;
+    call.fn === "transfer"
+      ? call.args?.[2]
+      : call.fn === "transfer_from"
+        ? call.args?.[3]
+        : undefined;
   if (arg === undefined) return null;
   if (typeof arg === "bigint") return arg;
   if (typeof arg === "number") return BigInt(arg);
   try {
     const native = scValToNative(arg);
-    return typeof native === "bigint" ? native : BigInt(native as number | string);
+    return typeof native === "bigint"
+      ? native
+      : BigInt(native as number | string);
   } catch {
     return null;
   }
@@ -526,14 +739,19 @@ export async function readPersistentEntry(
   );
   const response = await server.getLedgerEntries(key);
   const entry = response.entries?.[0] as unknown as {
-    val?: { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } } | { contractData?: { val?: xdr.ScVal } };
+    val?:
+      | { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } }
+      | { contractData?: { val?: xdr.ScVal } };
     lastModifiedLedgerSeq?: number;
   };
   let scval: xdr.ScVal | undefined;
   if (entry?.val) {
     const contractData =
-      typeof (entry.val as { contractData?: unknown }).contractData === "function"
-        ? (entry.val as { contractData: () => { val?: unknown } }).contractData()
+      typeof (entry.val as { contractData?: unknown }).contractData ===
+      "function"
+        ? (
+            entry.val as { contractData: () => { val?: unknown } }
+          ).contractData()
         : (entry.val as { contractData?: { val?: unknown } }).contractData;
     if (contractData) {
       scval =
@@ -624,7 +842,7 @@ export function validateGuardPolicy(
   const options: ValidatePolicyOptions =
     typeof optionsOrGuardAddress === "string"
       ? { guardAddress: optionsOrGuardAddress }
-      : optionsOrGuardAddress ?? {};
+      : (optionsOrGuardAddress ?? {});
 
   if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
     return [
@@ -639,7 +857,9 @@ export function validateGuardPolicy(
   const raw = policy as Record<string, unknown>;
   const failures: PolicyFailure[] = [];
   const maxRecipientEntries = options.maxRecipientEntries ?? 256;
-  const guardAddress = options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null;
+  const guardAddress = options.guardAddress
+    ? normalizeStellarAddress(options.guardAddress)
+    : null;
 
   // 1. per_tx_cap (SPEC §8 bullet 1)
   if (raw.per_tx_cap === undefined || raw.per_tx_cap === null) {
@@ -731,7 +951,8 @@ export function validateGuardPolicy(
       failures.push({
         path: "assets",
         rule: "empty_vector_noop",
-        message: "assets list is empty; SAC token transfers will never be allowed",
+        message:
+          "assets list is empty; SAC token transfers will never be allowed",
       });
     }
     const seenAssets = new Set<string>();
@@ -814,13 +1035,15 @@ export function validateGuardPolicy(
           failures.push({
             path: `protocols[${i}].fns`,
             rule: "invalid_type",
-            message: "protocol fns must be null or an array of function name strings",
+            message:
+              "protocol fns must be null or an array of function name strings",
           });
         } else if (ruleObj.fns.length === 0) {
           failures.push({
             path: `protocols[${i}].fns`,
             rule: "empty_protocol_functions",
-            message: "protocol fns list must not be empty (use null to allow any function)",
+            message:
+              "protocol fns list must not be empty (use null to allow any function)",
           });
         } else {
           const seenFns = new Set<string>();
@@ -870,7 +1093,8 @@ export function validateGuardPolicy(
       failures.push({
         path: "recipients",
         rule: "empty_vector_noop",
-        message: "recipients list is empty while allow_any_recipient is false; no recipient will be allowed",
+        message:
+          "recipients list is empty while allow_any_recipient is false; no recipient will be allowed",
       });
     }
     if (raw.recipients.length > maxRecipientEntries) {
@@ -949,7 +1173,8 @@ export function validateGuardPolicy(
           failures.push({
             path: `blocked_recipients[${i}]`,
             rule: "self_as_recipient",
-            message: "guard contract address cannot be listed as a blocked recipient",
+            message:
+              "guard contract address cannot be listed as a blocked recipient",
           });
         }
         // SPEC §8 bullet 9: recipients and blocked_recipients must not intersect
@@ -965,12 +1190,16 @@ export function validateGuardPolicy(
   }
 
   // 9. recipient_window_caps (SPEC §8 bullet 1, 3, 7, 8, 10)
-  if (raw.recipient_window_caps !== undefined && raw.recipient_window_caps !== null) {
+  if (
+    raw.recipient_window_caps !== undefined &&
+    raw.recipient_window_caps !== null
+  ) {
     if (!Array.isArray(raw.recipient_window_caps)) {
       failures.push({
         path: "recipient_window_caps",
         rule: "invalid_type",
-        message: "recipient_window_caps must be an array of RecipientWindowCap objects",
+        message:
+          "recipient_window_caps must be an array of RecipientWindowCap objects",
       });
     } else {
       if (raw.recipient_window_caps.length > maxRecipientEntries) {
@@ -987,7 +1216,8 @@ export function validateGuardPolicy(
           failures.push({
             path: `recipient_window_caps[${i}]`,
             rule: "invalid_type",
-            message: "recipient window cap entry must be an object with recipient and cap fields",
+            message:
+              "recipient window cap entry must be an object with recipient and cap fields",
           });
           continue;
         }
@@ -1012,7 +1242,8 @@ export function validateGuardPolicy(
             failures.push({
               path: `recipient_window_caps[${i}].recipient`,
               rule: "self_as_recipient_cap",
-              message: "guard contract address cannot be listed in recipient_window_caps",
+              message:
+                "guard contract address cannot be listed in recipient_window_caps",
             });
           }
         }
@@ -1106,7 +1337,8 @@ export function validateGuardPolicy(
       failures.push({
         path: "active_until",
         rule: "active_window_inverted",
-        message: "active_until must be 0 (no expiration) or strictly greater than active_from",
+        message:
+          "active_until must be 0 (no expiration) or strictly greater than active_from",
       });
     }
   }
@@ -1143,4 +1375,3 @@ export function validateGuardPolicy(
 
   return failures;
 }
-
