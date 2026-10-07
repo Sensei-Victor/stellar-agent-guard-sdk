@@ -19,14 +19,20 @@ import {
   decodePolicy,
   deadManRemaining,
   describePolicy,
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
   isDeadManFrozen,
   POLICY_RULE_IDS,
   policyFromScVal,
   policyToScVal,
+  readPersistentEntry,
   validateGuardPolicy,
   freezePolicy,
   unsafeContractAddress,
   unsafeAccountAddress,
+  unsafePublicKeyHex,
+  unsafeStrKeyAddress,
+  type RecipientWindowCap,
   type AccountAddress,
   type ContractAddress,
   type GuardStatus,
@@ -972,6 +978,187 @@ describe("validateGuardPolicy (SPEC §8)", () => {
       assert.ok(ruleIds.has("active_window_inverted"));
     });
   });
+
+  describe("SPEC §8 type guards on optional collections", () => {
+    it("rejects a non-array blocked_recipients", () => {
+      const failures = validateGuardPolicy({ ...samplePolicy(), blocked_recipients: 7 });
+      assert.ok(failures.some((f) => f.path === "blocked_recipients" && f.rule === "invalid_type"));
+    });
+
+    it("rejects blocked_recipients beyond maxRecipientEntries", () => {
+      const failures = validateGuardPolicy(
+        { ...samplePolicy(), blocked_recipients: [RECIPIENT, RECIPIENT] },
+        { maxRecipientEntries: 1 },
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "blocked_recipients" && f.rule === "max_recipient_entries_exceeded",
+        ),
+      );
+    });
+
+    it("rejects a malformed address inside blocked_recipients", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        blocked_recipients: ["not-a-stellar-address"],
+      });
+      assert.ok(
+        failures.some((f) => f.path === "blocked_recipients[0]" && f.rule === "invalid_address"),
+      );
+    });
+
+    it("rejects a non-array recipient_window_caps", () => {
+      const failures = validateGuardPolicy({ ...samplePolicy(), recipient_window_caps: 7 });
+      assert.ok(failures.some((f) => f.path === "recipient_window_caps" && f.rule === "invalid_type"));
+    });
+
+    it("rejects recipient_window_caps beyond maxRecipientEntries", () => {
+      const failures = validateGuardPolicy(
+        {
+          ...samplePolicy(),
+          recipient_window_caps: [
+            { recipient: RECIPIENT, cap: 1n },
+            { recipient: RECIPIENT, cap: 2n },
+          ],
+        },
+        { maxRecipientEntries: 1 },
+      );
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipient_window_caps" && f.rule === "max_recipient_entries_exceeded",
+        ),
+      );
+    });
+
+    it("rejects a non-object recipient_window_caps entry", () => {
+      const failures = validateGuardPolicy({ ...samplePolicy(), recipient_window_caps: [null] });
+      assert.ok(
+        failures.some((f) => f.path === "recipient_window_caps[0]" && f.rule === "invalid_type"),
+      );
+    });
+
+    it("rejects a malformed address inside recipient_window_caps", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        recipient_window_caps: [{ recipient: "not-a-stellar-address", cap: 1n }],
+      });
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipient_window_caps[0].recipient" && f.rule === "invalid_address",
+        ),
+      );
+    });
+
+    it("requires a cap amount on every recipient_window_caps entry", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        recipient_window_caps: [{ recipient: RECIPIENT }],
+      });
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipient_window_caps[0].cap" && f.rule === "missing_field",
+        ),
+      );
+    });
+
+    it("rejects a non-integer cap on a recipient_window_caps entry", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        recipient_window_caps: [{ recipient: RECIPIENT, cap: "lots" }],
+      });
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipient_window_caps[0].cap" && f.rule === "invalid_type",
+        ),
+      );
+    });
+  });
+
+  describe("SPEC §8 type guards on numeric fields", () => {
+    it("reports invalid types on every numeric field at once, not just the first", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        window_secs: "soon",
+        window_cap: "plenty",
+        active_from: "yesterday",
+        active_until: "never",
+        dms_grace_secs: "eventually",
+      });
+      for (const path of [
+        "window_secs",
+        "window_cap",
+        "active_from",
+        "active_until",
+        "dms_grace_secs",
+      ]) {
+        assert.ok(
+          failures.some((f) => f.path === path && f.rule === "invalid_type"),
+          `expected an invalid_type failure for ${path}`,
+        );
+      }
+    });
+
+    it("rejects a negative active_until", () => {
+      const failures = validateGuardPolicy(samplePolicy({ active_until: -5n }));
+      assert.ok(failures.some((f) => f.path === "active_until" && f.rule === "negative_amount"));
+    });
+
+    it("accepts base-10 string amounts rather than dropping them", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        per_tx_cap: "250",
+        window_cap: "150",
+      });
+      assert.deepEqual(failures, []);
+    });
+  });
+
+  describe("SPEC §8 protocol rule shape", () => {
+    it("rejects a protocol rule that is not an object", () => {
+      const failures = validateGuardPolicy({ ...samplePolicy(), protocols: [null] });
+      assert.ok(failures.some((f) => f.path === "protocols[0]" && f.rule === "invalid_type"));
+    });
+
+    it("rejects a protocol rule whose contract is not a Stellar address", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        protocols: [{ contract: "not-a-stellar-address", fns: null }],
+      });
+      assert.ok(
+        failures.some(
+          (f) => f.path === "protocols[0].contract" && f.rule === "invalid_address",
+        ),
+      );
+    });
+
+    it("rejects protocol fns that is neither null nor an array", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        protocols: [{ contract: TOKEN, fns: "transfer" }],
+      });
+      assert.ok(failures.some((f) => f.path === "protocols[0].fns" && f.rule === "invalid_type"));
+    });
+
+    it("rejects a non-string entry inside protocol fns", () => {
+      const failures = validateGuardPolicy({
+        ...samplePolicy(),
+        protocols: [{ contract: TOKEN, fns: [""] }],
+      });
+      assert.ok(
+        failures.some((f) => f.path === "protocols[0].fns[0]" && f.rule === "invalid_type"),
+      );
+    });
+  });
+
+  describe("validation options", () => {
+    it("treats an unparseable guardAddress option as no guard address at all", () => {
+      const failures = validateGuardPolicy(samplePolicy(), {
+        guardAddress: "not-a-guard-address",
+      });
+      assert.deepEqual(failures, []);
+    });
+  });
 });
 
 describe("freezePolicy", () => {
@@ -1005,6 +1192,19 @@ describe("freezePolicy", () => {
     }, TypeError);
     assert.throws(() => {
       (frozen.protocols[0] as { contract: string }).contract = TOKEN;
+    }, TypeError);
+  });
+
+  it("freezes recipient_window_caps entries and the array itself", () => {
+    const caps: RecipientWindowCap[] = [{ recipient: RECIPIENT, cap: 10n }];
+    const frozen = freezePolicy(samplePolicy({ recipient_window_caps: caps }));
+    const frozenCaps = (frozen as unknown as { recipient_window_caps: RecipientWindowCap[] })
+      .recipient_window_caps;
+    assert.throws(() => {
+      frozenCaps.push({ recipient: RECIPIENT, cap: 20n });
+    }, TypeError);
+    assert.throws(() => {
+      frozenCaps[0]!.cap = 99n;
     }, TypeError);
   });
 
@@ -1272,5 +1472,126 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
         failAt("re-encode", iteration, policy, error);
       }
     }
+  });
+});
+
+/**
+ * The "no policy supplied" path: ledger reads and SAC amount extraction.
+ *
+ * `readPersistentEntry` understands both shapes the RPC layer hands back —
+ * accessor functions (XDR structs) and plain data — so each gets its own case
+ * here instead of relying on the interceptor's happy path to cover one of them.
+ * `fetchGuardPolicyAndWindow` is driven with the same canned server: Policy is
+ * read first, Window second, exactly as the two reads are issued.
+ */
+describe("ledger reads (policy and window from storage)", () => {
+  type LedgerServer = Parameters<typeof readPersistentEntry>[0];
+
+  /** Minimal `rpc.Server` stand-in: one canned entry per call, in call order. */
+  function ledgerServer(entries: unknown[]): LedgerServer {
+    let call = 0;
+    return {
+      getLedgerEntries: () => Promise.resolve({ entries: [entries[call++]] }),
+    } as unknown as LedgerServer;
+  }
+
+  it("decodes an entry exposed through accessor functions", async () => {
+    const server = ledgerServer([
+      { val: { contractData: () => ({ val: () => xdr.ScVal.scvSymbol("Policy") }) } },
+    ]);
+    assert.deepEqual(await readPersistentEntry(server, GUARD, "Policy"), {
+      value: "Policy",
+      lastModifiedLedgerSeq: null,
+    });
+  });
+
+  it("decodes an entry exposed as plain data and reports its ledger sequence", async () => {
+    const server = ledgerServer([
+      {
+        val: { contractData: { val: nativeToScVal(42, { type: "u64" }) } },
+        lastModifiedLedgerSeq: 7,
+      },
+    ]);
+    assert.deepEqual(await readPersistentEntry(server, GUARD, "Window"), {
+      value: 42n,
+      lastModifiedLedgerSeq: 7,
+    });
+  });
+
+  it("returns null when the entry carries no contract data payload", async () => {
+    const server = ledgerServer([{ val: {} }]);
+    assert.equal(await readPersistentEntry(server, GUARD, "Policy"), null);
+  });
+
+  it("returns null when the ledger has no entry for the key", async () => {
+    const server = ledgerServer([undefined]);
+    assert.equal(await readPersistentEntry(server, GUARD, "Policy"), null);
+  });
+
+  it("reads the policy and the committed window spend from ledger storage", async () => {
+    const policyValue = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("label"),
+        val: xdr.ScVal.scvString("live"),
+      }),
+    ]);
+    const windowValue = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("total"),
+        val: nativeToScVal(5, { type: "u64" }),
+      }),
+    ]);
+    const server = ledgerServer([
+      { val: { contractData: { val: policyValue } }, lastModifiedLedgerSeq: 1 },
+      { val: { contractData: { val: windowValue } }, lastModifiedLedgerSeq: 2 },
+    ]);
+
+    const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
+
+    assert.deepEqual(policy as unknown, { label: "live" });
+    assert.equal(windowSpent, 5n);
+  });
+
+  it("reports no policy and a zero spend when neither entry is present", async () => {
+    const server = ledgerServer([undefined, undefined]);
+    const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
+    assert.equal(policy, null);
+    assert.equal(windowSpent, 0n);
+  });
+});
+
+describe("extractTransferAmount", () => {
+  it("reads the amount argument of a SAC transfer", () => {
+    const amount = extractTransferAmount({
+      contract: GUARD,
+      fn: "transfer",
+      args: [
+        nativeToScVal(GUARD, { type: "address" }),
+        nativeToScVal(RECIPIENT, { type: "address" }),
+        nativeToScVal(10n, { type: "i128" }),
+      ],
+    });
+    assert.equal(amount, 10n);
+  });
+
+  it("returns null when the amount argument cannot be decoded", () => {
+    const amount = extractTransferAmount({
+      contract: GUARD,
+      fn: "transfer_from",
+      args: [
+        nativeToScVal(GUARD, { type: "address" }),
+        nativeToScVal(RECIPIENT, { type: "address" }),
+        nativeToScVal(RECIPIENT, { type: "address" }),
+        xdr.ScVal.scvString("not-a-number"),
+      ],
+    });
+    assert.equal(amount, null);
+  });
+});
+
+describe("unsafe address casts", () => {
+  it("returns already-validated values unchanged", () => {
+    assert.equal(unsafeStrKeyAddress(RECIPIENT), RECIPIENT);
+    assert.equal(unsafePublicKeyHex("ab".repeat(32)), "ab".repeat(32));
   });
 });
